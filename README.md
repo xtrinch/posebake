@@ -172,3 +172,8 @@ println!("{} triangles", report.triangles);
 
 `posebake::bake::bake` returns the mesh in memory; `posebake::obj` and `posebake::glb` turn it
 into file contents.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT), at your option.

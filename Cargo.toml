@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "Pose skinned glTF models and bake them into static OBJ or GLB meshes with colours sampled from their textures"
 readme = "README.md"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/xtrinch/posebake"
 keywords = ["gltf", "obj", "skinning", "mesh", "vertex-color"]
 categories = ["graphics", "game-development", "command-line-utilities"]
 
