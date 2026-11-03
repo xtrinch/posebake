@@ -1,5 +1,9 @@
 # posebake
 
+[![crates.io](https://img.shields.io/crates/v/posebake.svg)](https://crates.io/crates/posebake)
+[![docs.rs](https://img.shields.io/docsrs/posebake)](https://docs.rs/posebake)
+[![license](https://img.shields.io/crates/l/posebake.svg)](#license)
+
 Pose skinned glTF models and bake them into static OBJ or GLB meshes, coloured from their
 materials' textures.
 
@@ -21,7 +25,7 @@ own pose steps, and writes a static mesh whose colours are sampled from the text
 ## Install
 
 ```sh
-cargo install --path .
+cargo install posebake
 ```
 
 ## Usage
