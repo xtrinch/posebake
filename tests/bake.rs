@@ -43,6 +43,13 @@ const UVS: [[f32; 2]; 5] = [
     [0.9, 0.1],
 ];
 const INDICES: [u16; 9] = [0, 1, 2, 0, 2, 3, 1, 4, 2];
+// 90 degrees around z as a quaternion (x, y, z, w).
+const QUARTER_TURN: [f32; 4] = [
+    0.0,
+    0.0,
+    std::f32::consts::FRAC_1_SQRT_2,
+    std::f32::consts::FRAC_1_SQRT_2,
+];
 
 /// A fresh, empty folder for one test.
 fn folder(name: &str) -> PathBuf {
@@ -77,6 +84,22 @@ fn write_model(dir: &Path, base_color_factor: [f32; 4]) -> PathBuf {
             &[inverse_bind(0.0), inverse_bind(1.0), inverse_bind(2.0)].concat(),
             f32s,
         ),
+        // Animation keys at 0 and 1 seconds, turning the arm 0 -> 90 degrees around z.
+        bytes(&[0.0f32, 1.0], f32s),
+        bytes(&[[0.0f32, 0.0, 0.0, 1.0], QUARTER_TURN].concat(), f32s),
+        // The same as cubic spline keys (in-tangent, value, out-tangent) with zero tangents.
+        bytes(
+            &[
+                [0.0f32; 4],
+                [0.0, 0.0, 0.0, 1.0],
+                [0.0; 4],
+                [0.0; 4],
+                QUARTER_TURN,
+                [0.0; 4],
+            ]
+            .concat(),
+            f32s,
+        ),
     ];
     let mut buffer = Vec::new();
     let mut buffer_views = Vec::new();
@@ -97,6 +120,14 @@ fn write_model(dir: &Path, base_color_factor: [f32; 4]) -> PathBuf {
     let base64 = base64::engine::general_purpose::STANDARD;
 
     let accessor = |view: usize, component: u32, count: usize, kind: &str| json!({ "bufferView": view, "componentType": component, "count": count, "type": kind });
+    // An animation rotating the arm (node 1), keyed at accessor 7 with outputs at `output`.
+    let animation = |name: &str, output: usize, interpolation: &str| {
+        json!({
+            "name": name,
+            "channels": [{ "sampler": 0, "target": { "node": 1, "path": "rotation" } }],
+            "samplers": [{ "input": 7, "output": output, "interpolation": interpolation }]
+        })
+    };
     let document = json!({
         "asset": { "version": "2.0" },
         "scene": 0,
@@ -131,7 +162,15 @@ fn write_model(dir: &Path, base_color_factor: [f32; 4]) -> PathBuf {
             accessor(3, 5123, 5, "VEC4"),
             accessor(4, 5126, 5, "VEC4"),
             accessor(5, 5123, 9, "SCALAR"),
-            accessor(6, 5126, 3, "MAT4")
+            accessor(6, 5126, 3, "MAT4"),
+            { "bufferView": 7, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [0.0], "max": [1.0] },
+            accessor(8, 5126, 2, "VEC4"),
+            accessor(9, 5126, 6, "VEC4")
+        ],
+        "animations": [
+            animation("Turn", 8, "LINEAR"),
+            animation("Snap", 8, "STEP"),
+            animation("Smooth", 9, "CUBICSPLINE")
         ],
         "bufferViews": buffer_views,
         "buffers": [{
@@ -382,4 +421,148 @@ fn missing_normals_are_computed_from_the_faces() {
             "{n:?}"
         );
     }
+}
+
+/// Bake a recipe next to a fresh model without parsing the output.
+fn bake_only(name: &str, recipe: &str) -> (PathBuf, posebake::Report) {
+    let dir = folder(name);
+    write_model(&dir, [1.0, 1.0, 1.0, 1.0]);
+    let recipe_path = dir.join("recipe.toml");
+    std::fs::write(&recipe_path, recipe).unwrap();
+    let report = posebake::run(&recipe_path, Some(&dir.join("out"))).unwrap();
+    (dir, report)
+}
+
+#[test]
+fn glb_with_triangle_colours_gives_each_triangle_flat_vertex_colours() {
+    let recipe = format!("formats = [\"glb\"]\n\n{}", source_line("model.gltf"));
+    let (dir, report) = bake_only("glb-triangle", &recipe);
+    assert_eq!(report.files, vec![dir.join("out.glb")]);
+
+    let (document, buffers, _) = gltf::import(dir.join("out.glb")).unwrap();
+    assert_eq!(document.materials().count(), 1);
+    let mesh = document.meshes().next().unwrap();
+    assert_eq!(mesh.primitives().count(), 1, "one draw call");
+    let primitive = mesh.primitives().next().unwrap();
+    let reader = primitive.reader(|b| Some(&buffers[b.index()]));
+    let positions: Vec<[f32; 3]> = reader.read_positions().unwrap().collect();
+    let colours: Vec<[f32; 3]> = reader.read_colors(0).unwrap().into_rgb_f32().collect();
+    let indices: Vec<u32> = reader.read_indices().unwrap().into_u32().collect();
+
+    // Three unshared corners per triangle, in triangle order.
+    assert_eq!(indices, (0..9).collect::<Vec<u32>>());
+    for (corner, &vertex) in INDICES.iter().enumerate() {
+        assert_close(positions[corner], POSITIONS[vertex as usize]);
+    }
+    let triangle_colours = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]];
+    for (corner, colour) in colours.iter().enumerate() {
+        assert_close(*colour, triangle_colours[corner / 3]);
+    }
+}
+
+#[test]
+fn vertex_colours_sample_each_vertex_in_glb_and_obj() {
+    let recipe = format!(
+        "formats = [\"glb\", \"obj\"]\ncolors = \"vertex\"\n\n{}",
+        source_line("model.gltf")
+    );
+    let (dir, _) = bake_only("vertex-colours", &recipe);
+    // Texels at each vertex: blue, red, white, green, red. Pure colours are equal in sRGB
+    // and linear light.
+    let expected = [
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 1.0],
+        [0.0, 1.0, 0.0],
+        [1.0, 0.0, 0.0],
+    ];
+
+    let (document, buffers, _) = gltf::import(dir.join("out.glb")).unwrap();
+    let primitive = document
+        .meshes()
+        .next()
+        .unwrap()
+        .primitives()
+        .next()
+        .unwrap();
+    let reader = primitive.reader(|b| Some(&buffers[b.index()]));
+    let colours: Vec<[f32; 3]> = reader.read_colors(0).unwrap().into_rgb_f32().collect();
+    assert_eq!(colours.len(), 5);
+    for (actual, expected) in colours.iter().zip(expected) {
+        assert_close(*actual, expected);
+    }
+
+    let obj = std::fs::read_to_string(dir.join("out.obj")).unwrap();
+    let vertices: Vec<Vec<f32>> = obj
+        .lines()
+        .filter_map(|line| line.strip_prefix("v "))
+        .map(|rest| rest.split(' ').map(|v| v.parse().unwrap()).collect())
+        .collect();
+    for (vertex, expected) in vertices.iter().zip(expected) {
+        assert_eq!(vertex.len(), 6, "{vertex:?}");
+        assert_close([vertex[3], vertex[4], vertex[5]], expected);
+    }
+}
+
+fn animated(name: &str, animation: &str, time: f32) -> Vec<[f32; 3]> {
+    let recipe = format!(
+        "[animation]\nname = \"{animation}\"\ntime = {time:?}\n\n{}",
+        source_line("model.gltf")
+    );
+    bake(name, &recipe).positions
+}
+
+#[test]
+fn animation_frames_set_the_starting_pose() {
+    let (c, s) = (
+        std::f32::consts::FRAC_1_SQRT_2,
+        std::f32::consts::FRAC_1_SQRT_2,
+    );
+    // Arm vertices v1 (2, 0) and v4 (3, 0.5) turned around the arm joint at (1, 0).
+    let quarter = [[1.0, 1.0, 0.0], [0.5, 2.0, 0.0]];
+    let eighth = [
+        [1.0 + c, s, 0.0],
+        [1.0 + 2.0 * c - 0.5 * s, 2.0 * s + 0.5 * c, 0.0],
+    ];
+    let rest = [POSITIONS[1], POSITIONS[4]];
+    let check = |positions: Vec<[f32; 3]>, expected: [[f32; 3]; 2]| {
+        assert_close(positions[1], expected[0]);
+        assert_close(positions[4], expected[1]);
+    };
+
+    check(animated("turn-end", "Turn", 1.0), quarter);
+    check(animated("turn-half", "Turn", 0.5), eighth);
+    check(animated("turn-after", "Turn", 5.0), quarter);
+    check(animated("snap-half", "Snap", 0.5), rest);
+    check(animated("snap-end", "Snap", 1.0), quarter);
+    // Zero tangents make the spline's midpoint the halfway rotation.
+    check(animated("smooth-half", "Smooth", 0.5), eighth);
+}
+
+#[test]
+fn pose_steps_apply_on_top_of_the_animation_frame() {
+    let recipe = format!(
+        "[animation]\nname = \"Turn\"\ntime = 1.0\n\n{}\n\
+         [[pose]]\nkind = \"rotate\"\njoint = \"arm\"\naxis = [0.0, 0.0, 1.0]\ndegrees = -90.0\n",
+        source_line("model.gltf")
+    );
+    let out = bake("anim-then-pose", &recipe);
+    for (actual, expected) in out.positions.iter().zip(POSITIONS) {
+        assert_close(*actual, expected);
+    }
+}
+
+#[test]
+fn a_missing_animation_falls_back_to_the_rest_pose() {
+    let recipe = format!(
+        "[animation]\nname = \"Dance\"\n\n{}",
+        source_line("model.gltf")
+    );
+    let out = bake("no-animation", &recipe);
+    assert_close(out.positions[1], POSITIONS[1]);
+    assert!(
+        out.notes
+            .iter()
+            .any(|note| note.contains("no animation Dance"))
+    );
 }

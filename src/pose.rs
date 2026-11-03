@@ -34,11 +34,15 @@ impl PoseStep {
     }
 }
 
-/// Model-space node transforms after applying the steps in order. Steps naming a joint the
-/// source does not have are skipped and reported, so a hair-only file can share a recipe with
-/// a full body.
-pub fn apply(source: &Source, steps: &[PoseStep]) -> Result<(Vec<Mat4>, Vec<String>)> {
-    let mut posed = source.rest.clone();
+/// Model-space node transforms after applying the steps in order to `start` (the rest pose or
+/// an animation frame). Steps naming a joint the source does not have are skipped and
+/// reported, so a hair-only file can share a recipe with a full body.
+pub fn apply(
+    source: &Source,
+    start: Vec<Mat4>,
+    steps: &[PoseStep],
+) -> Result<(Vec<Mat4>, Vec<String>)> {
+    let mut posed = start;
     let mut skipped = Vec::new();
     for step in steps {
         let missing: Vec<&str> = step

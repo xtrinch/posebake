@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Result, bail};
 use glam::{Mat4, Vec3};
 
+use crate::animation;
 use crate::pose;
 use crate::recipe::Recipe;
 use crate::source::Source;
@@ -17,8 +18,10 @@ pub struct Mesh {
     /// Unit normal per vertex.
     pub normals: Vec<Vec3>,
     pub triangles: Vec<[u32; 3]>,
-    /// sRGB colour (0-1) per triangle.
+    /// sRGB colour (0-1) per triangle, sampled at the triangle's centre.
     pub colors: Vec<Vec3>,
+    /// sRGB colour (0-1) per vertex, sampled at the vertex's own texture coordinate.
+    pub vertex_colors: Vec<Vec3>,
 }
 
 /// Pose, skin, filter and colour every source of the recipe into one mesh. Returns the mesh
@@ -28,8 +31,21 @@ pub fn bake(recipe: &Recipe) -> Result<(Mesh, Vec<String>)> {
     let mut notes = Vec::new();
     for spec in &recipe.sources {
         let source = Source::load(&spec.gltf)?;
-        let (posed, skipped) = pose::apply(&source, &recipe.pose)?;
         let name = spec.gltf.display();
+        let start = match &recipe.animation {
+            Some(frame) => match animation::sample(&source, &frame.name, frame.time) {
+                Some(locals) => source.globals(&locals),
+                None => {
+                    notes.push(format!(
+                        "{name}: no animation {}; starting from the rest pose",
+                        frame.name
+                    ));
+                    source.rest.clone()
+                }
+            },
+            None => source.rest.clone(),
+        };
+        let (posed, skipped) = pose::apply(&source, start, &recipe.pose)?;
         notes.extend(skipped.into_iter().map(|note| format!("{name}: {note}")));
 
         let mut keep: Option<HashSet<usize>> = None;
@@ -179,15 +195,21 @@ fn add_primitive(
         {
             continue;
         }
-        let color = match &texture {
-            Some((image, uvs)) => {
-                let u = corners.iter().map(|&c| uvs[c as usize][0]).sum::<f32>() / 3.0;
-                let v = corners.iter().map(|&c| uvs[c as usize][1]).sum::<f32>() / 3.0;
-                let linear = texture::srgb_to_linear(texture::sample(image, u, v)) * factor;
-                texture::linear_to_srgb(linear)
-            }
+        // Texture colour times the factor, in linear light, back to sRGB.
+        let color_at = |u: f32, v: f32| match &texture {
+            Some((image, _)) => texture::linear_to_srgb(
+                texture::srgb_to_linear(texture::sample(image, u, v)) * factor,
+            ),
             None => texture::linear_to_srgb(factor),
         };
+        let uv = |c: u32| {
+            texture
+                .as_ref()
+                .map_or([0.0; 2], |(_, uvs)| uvs[c as usize])
+        };
+        let centre_u = corners.iter().map(|&c| uv(c)[0]).sum::<f32>() / 3.0;
+        let centre_v = corners.iter().map(|&c| uv(c)[1]).sum::<f32>() / 3.0;
+        let color = color_at(centre_u, centre_v);
         let mut triangle = [0u32; 3];
         for (slot, &corner) in triangle.iter_mut().zip(&corners) {
             *slot = *remap.entry(corner).or_insert_with(|| {
@@ -200,6 +222,8 @@ fn add_primitive(
                         .normalize_or_zero()
                 });
                 mesh.normals.push(normal);
+                let [u, v] = uv(corner);
+                mesh.vertex_colors.push(color_at(u, v));
                 (mesh.positions.len() - 1) as u32
             });
         }

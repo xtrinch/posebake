@@ -12,9 +12,18 @@ use crate::pose::PoseStep;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Recipe {
-    /// Output path without extension; `.obj` and `.mtl` are added. Relative to the recipe.
+    /// Output path without extension; each format adds its own. Relative to the recipe.
     pub output: Option<PathBuf>,
-    /// Comment written at the top of both output files, e.g. credits and licenses.
+    /// Files to write: `obj` (with an `.mtl`) and/or `glb`.
+    #[serde(default = "default_formats")]
+    pub formats: Vec<Format>,
+    /// One colour per triangle (sampled at its centre) or per vertex (sampled at each corner).
+    #[serde(default)]
+    pub colors: ColorMode,
+    /// Start from a frame of one of the sources' animations instead of the rest pose.
+    #[serde(default)]
+    pub animation: Option<AnimationFrame>,
+    /// Comment written into the outputs, e.g. credits and licenses.
     #[serde(default)]
     pub header: Option<String>,
     /// Colour levels per channel when grouping triangle colours into materials. Colours are
@@ -32,6 +41,36 @@ pub struct Recipe {
     pub pose: Vec<PoseStep>,
 }
 
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Format {
+    /// Wavefront OBJ with an MTL file of diffuse colours.
+    Obj,
+    /// Binary glTF.
+    Glb,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ColorMode {
+    /// Each triangle gets the texture colour at its centre; written as materials.
+    #[default]
+    Triangle,
+    /// Each vertex gets the texture colour at its own texture coordinate; written as vertex
+    /// colours.
+    Vertex,
+}
+
+/// A frame of a named animation, used as the starting pose before any `[[pose]]` steps.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnimationFrame {
+    pub name: String,
+    /// Seconds from the animation's start; clamped to its length.
+    #[serde(default)]
+    pub time: f32,
+}
+
 /// One glTF file and the parts of it to keep.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -45,6 +84,10 @@ pub struct SourceSpec {
     /// e.g. `["Head"]` to take just the head of a full body. Empty keeps all.
     #[serde(default)]
     pub keep_joints: Vec<String>,
+}
+
+fn default_formats() -> Vec<Format> {
+    vec![Format::Obj]
 }
 
 fn default_palette_levels() -> u32 {
@@ -61,6 +104,9 @@ impl Recipe {
         let recipe: Recipe = toml::from_str(text).context("invalid recipe")?;
         if recipe.sources.is_empty() {
             anyhow::bail!("the recipe has no [[source]] entries");
+        }
+        if recipe.formats.is_empty() {
+            anyhow::bail!("`formats` is empty; list at least one of \"obj\", \"glb\"");
         }
         Ok(recipe)
     }

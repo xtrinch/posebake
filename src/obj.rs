@@ -1,54 +1,39 @@
 //! Writing a baked mesh as Wavefront OBJ with an MTL file of diffuse colours.
 
-use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
-use glam::Vec3;
+use anyhow::Result;
 
 use crate::bake::Mesh;
+use crate::palette::Palette;
 
-/// Paths written and how many colour materials the MTL holds.
-pub struct Written {
-    pub obj: PathBuf,
-    pub mtl: PathBuf,
-    pub materials: usize,
-}
-
-/// Write `<base>.obj` and `<base>.mtl`. Triangle colours are rounded to `palette_levels` steps
-/// per channel (0 keeps 8-bit colours) and each distinct colour becomes one material.
+/// Write `<base>.obj` and `<base>.mtl`; returns their paths. Each palette colour becomes one
+/// material. With `vertex_colors`, vertices are also written as `v x y z r g b`, a widely
+/// supported OBJ extension.
 pub fn write(
     mesh: &Mesh,
+    palette: &Palette,
     base: &Path,
     header: Option<&str>,
-    palette_levels: u32,
-) -> Result<Written> {
+    vertex_colors: bool,
+) -> Result<Vec<PathBuf>> {
     let obj_path = base.with_extension("obj");
     let mtl_path = base.with_extension("mtl");
-    let (obj, mtl, materials) = to_strings(mesh, &mtl_path, header, palette_levels);
-    if let Some(folder) = obj_path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(folder)
-            .with_context(|| format!("cannot create {}", folder.display()))?;
-    }
-    std::fs::write(&obj_path, obj)
-        .with_context(|| format!("cannot write {}", obj_path.display()))?;
-    std::fs::write(&mtl_path, mtl)
-        .with_context(|| format!("cannot write {}", mtl_path.display()))?;
-    Ok(Written {
-        obj: obj_path,
-        mtl: mtl_path,
-        materials,
-    })
+    let (obj, mtl) = to_strings(mesh, palette, &mtl_path, header, vertex_colors);
+    crate::write_file(&obj_path, obj.as_bytes())?;
+    crate::write_file(&mtl_path, mtl.as_bytes())?;
+    Ok(vec![obj_path, mtl_path])
 }
 
-/// The OBJ and MTL text, and the number of materials.
+/// The OBJ and MTL text.
 pub fn to_strings(
     mesh: &Mesh,
+    palette: &Palette,
     mtl_path: &Path,
     header: Option<&str>,
-    palette_levels: u32,
-) -> (String, String, usize) {
+    vertex_colors: bool,
+) -> (String, String) {
     let mut comment = String::new();
     for line in header.unwrap_or_default().lines() {
         let _ = writeln!(comment, "# {line}");
@@ -57,22 +42,19 @@ pub fn to_strings(
     let mut obj = comment.clone();
     let mtl_name = mtl_path.file_name().unwrap_or_default().to_string_lossy();
     let _ = writeln!(obj, "mtllib {mtl_name}");
-    for p in &mesh.positions {
-        let _ = writeln!(obj, "v {} {} {}", num(p.x), num(p.y), num(p.z));
+    for (index, p) in mesh.positions.iter().enumerate() {
+        let _ = write!(obj, "v {} {} {}", num(p.x), num(p.y), num(p.z));
+        if vertex_colors {
+            let c = mesh.vertex_colors[index];
+            let _ = write!(obj, " {} {} {}", num(c.x), num(c.y), num(c.z));
+        }
+        obj.push('\n');
     }
     for n in &mesh.normals {
         let _ = writeln!(obj, "vn {} {} {}", num(n.x), num(n.y), num(n.z));
     }
-
-    let mut palette: HashMap<[u16; 3], usize> = HashMap::new();
-    let mut ordered: Vec<[u16; 3]> = Vec::new();
     let mut current = None;
-    for (triangle, color) in mesh.triangles.iter().zip(&mesh.colors) {
-        let key = quantize(*color, palette_levels);
-        let material = *palette.entry(key).or_insert_with(|| {
-            ordered.push(key);
-            ordered.len() - 1
-        });
+    for (triangle, &material) in mesh.triangles.iter().zip(&palette.of_triangle) {
         if current != Some(material) {
             current = Some(material);
             let _ = writeln!(obj, "usemtl c{material}");
@@ -82,27 +64,11 @@ pub fn to_strings(
     }
 
     let mut mtl = comment;
-    let steps = steps(palette_levels) as f32;
-    for (index, key) in ordered.iter().enumerate() {
-        let [r, g, b] = key.map(|c| num(c as f32 / steps));
+    for (index, color) in palette.colors.iter().enumerate() {
+        let [r, g, b] = color.to_array().map(num);
         let _ = writeln!(mtl, "newmtl c{index}\nKd {r} {g} {b}");
     }
-    (obj, mtl, ordered.len())
-}
-
-fn steps(palette_levels: u32) -> u32 {
-    if palette_levels >= 2 {
-        palette_levels - 1
-    } else {
-        255
-    }
-}
-
-fn quantize(color: Vec3, palette_levels: u32) -> [u16; 3] {
-    let steps = steps(palette_levels) as f32;
-    color
-        .to_array()
-        .map(|c| (c.clamp(0.0, 1.0) * steps).round() as u16)
+    (obj, mtl)
 }
 
 // Up to 5 decimals, without trailing zeros.

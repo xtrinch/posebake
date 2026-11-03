@@ -4,15 +4,32 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use glam::Mat4;
+use glam::{Mat4, Quat, Vec3};
+
+/// A node's local transform as translation, rotation and scale.
+#[derive(Clone, Copy, Debug)]
+pub struct Trs {
+    pub translation: Vec3,
+    pub rotation: Quat,
+    pub scale: Vec3,
+}
+
+impl Trs {
+    pub fn matrix(&self) -> Mat4 {
+        Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.translation)
+    }
+}
 
 pub struct Source {
     pub document: gltf::Document,
     pub buffers: Vec<gltf::buffer::Data>,
     /// Decoded images by image index; only those used as a base colour texture.
     pub images: HashMap<usize, gltf::image::Data>,
+    /// Every node's local transform in the file's rest pose, by node index.
+    pub rest_locals: Vec<Trs>,
     /// Model-space transform of every node in the file's rest pose, by node index.
     pub rest: Vec<Mat4>,
+    parents: Vec<Option<usize>>,
 }
 
 impl Source {
@@ -46,21 +63,38 @@ impl Source {
                 parents[child.index()] = Some(node.index());
             }
         }
-        let locals: Vec<Mat4> = document
+        let rest_locals: Vec<Trs> = document
             .nodes()
-            .map(|node| Mat4::from_cols_array_2d(&node.transform().matrix()))
+            .map(|node| {
+                let (translation, rotation, scale) = node.transform().decomposed();
+                Trs {
+                    translation: Vec3::from(translation),
+                    rotation: Quat::from_array(rotation),
+                    scale: Vec3::from(scale),
+                }
+            })
             .collect();
-        let mut rest = vec![None; locals.len()];
-        for index in 0..locals.len() {
-            global(index, &parents, &locals, &mut rest);
-        }
 
-        Ok(Self {
+        let mut source = Self {
             document,
             buffers,
             images,
-            rest: rest.into_iter().map(Option::unwrap).collect(),
-        })
+            rest_locals,
+            rest: Vec::new(),
+            parents,
+        };
+        source.rest = source.globals(&source.rest_locals);
+        Ok(source)
+    }
+
+    /// Model-space transforms of all nodes for the given local transforms.
+    pub fn globals(&self, locals: &[Trs]) -> Vec<Mat4> {
+        let locals: Vec<Mat4> = locals.iter().map(Trs::matrix).collect();
+        let mut done = vec![None; locals.len()];
+        for index in 0..locals.len() {
+            global(index, &self.parents, &locals, &mut done);
+        }
+        done.into_iter().map(Option::unwrap).collect()
     }
 
     /// Index of the first node with this name.

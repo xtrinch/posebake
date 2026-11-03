@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-/// Pose skinned glTF models and bake them into static OBJ meshes with colours sampled from
-/// their textures.
+/// Pose skinned glTF models and bake them into static OBJ or GLB meshes with colours sampled
+/// from their textures.
 #[derive(Parser)]
 #[command(version)]
 struct Args {
@@ -20,13 +20,12 @@ fn main() -> anyhow::Result<()> {
     for note in &report.notes {
         eprintln!("note: {note}");
     }
+    for file in &report.files {
+        println!("wrote {}", file.display());
+    }
     println!(
-        "wrote {} and {}: {} triangles, {} vertices, {} colours",
-        report.written.obj.display(),
-        report.written.mtl.display(),
-        report.triangles,
-        report.vertices,
-        report.written.materials,
+        "{} triangles, {} vertices, {} colours",
+        report.triangles, report.vertices, report.colors
     );
     Ok(())
 }
